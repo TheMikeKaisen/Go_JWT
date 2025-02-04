@@ -31,6 +31,10 @@ func hashPassword(password string) (string, error) {
 	return string(hashedPassword), nil
 }
 
+func verifyPassword(hashedPassword string, password string) error {
+	return bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(password))
+}
+
 func Signup() gin.HandlerFunc {
 	return func(c *gin.Context) {
 
@@ -54,6 +58,7 @@ func Signup() gin.HandlerFunc {
 		user.ID = primitive.NewObjectID()
 		user.Created_At = time.Now()
 		user.Updated_at = time.Now()
+		user.User_id = user.ID.Hex()
 
 		// validate the body
 		validateErr := validate.Struct(user)
@@ -67,7 +72,7 @@ func Signup() gin.HandlerFunc {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		// check if email or phone number already exists.
+		// 4. check if email or phone number already exists.
 		countEmail, countErr := userCollection.CountDocuments(ctx, bson.M{"email": user.Email})
 		if countErr != nil {
 			fmt.Println("Error while counting documents!")
@@ -87,7 +92,16 @@ func Signup() gin.HandlerFunc {
 			return
 		}
 
-		// create user
+		accessToken, refreshToken, tokenErr := helpers.GenerateAllTokens(*user.Email, *user.First_name, *user.Last_name, *user.User_type, user.User_id)
+
+		if tokenErr != nil {
+			return
+		}
+
+		user.Refresh_token = &refreshToken
+		user.Token = &accessToken
+
+		// 5. create user
 		_, insertErr := userCollection.InsertOne(ctx, user)
 		if insertErr != nil {
 			fmt.Println("Insert error")
@@ -95,8 +109,58 @@ func Signup() gin.HandlerFunc {
 			return
 		}
 
-		// return user
+		// 6. return user
 		c.JSON(http.StatusOK, user)
+
+	}
+}
+
+func Login() gin.HandlerFunc {
+	return func(c *gin.Context) {
+
+		var user models.User
+
+		bindErr := c.ShouldBindJSON(&user)
+		if bindErr != nil {
+			fmt.Println("Error binding body into user.")
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Hour)
+		defer cancel()
+
+		var foundUser models.User
+
+		userDecodeErr := userCollection.FindOne(ctx, bson.M{"email": user.Email}).Decode(&foundUser)
+		if userDecodeErr != nil {
+			fmt.Println("User Decode Error", userDecodeErr)
+			return
+		}
+
+		// check if password is correct
+		verifyErr := verifyPassword(*foundUser.Password, *user.Password)
+		if verifyErr != nil {
+			fmt.Println("Email or password is wrong!")
+			return
+		}
+
+		accessToken, refreshToken, tokenErr := helpers.GenerateAllTokens(*foundUser.Email, *foundUser.First_name, *foundUser.Last_name, *foundUser.User_type, foundUser.User_id)
+
+		if tokenErr != nil {
+			return
+		}
+
+		updateErr := helpers.UpdateTokens(accessToken, refreshToken, foundUser.User_id)
+		if updateErr != nil {
+			return
+		}
+		findErr := userCollection.FindOne(ctx, bson.M{"user_id": foundUser.User_id}).Decode(&foundUser)
+		if findErr != nil {
+			fmt.Println("Find Error")
+			return
+		}
+
+		c.JSON(200, foundUser)
 
 	}
 }
